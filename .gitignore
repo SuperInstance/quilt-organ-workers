@@ -1,0 +1,6 @@
+# quilt-organ-workers — nothing sensitive belongs here; keys live ONLY in
+# gitignored .env.keys (absolute path outside this repo) and as Worker secrets.
+node_modules/
+*.log
+.env*
+!.env.example

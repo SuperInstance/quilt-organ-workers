@@ -1,0 +1,72 @@
+{
+  "manifest": {
+    "author": "lane-63-e",
+    "cells": [
+      {
+        "id": "greet-0",
+        "kind": "greeter",
+        "entry": "greet"
+      },
+      {
+        "id": "greet-1",
+        "kind": "greeter",
+        "entry": "greet"
+      }
+    ],
+    "createdAt": "2026-10-02T00:00:00Z",
+    "name": "greeter-organ",
+    "receiptRange": [
+      "6b58a6b6839aab9fead4e2184a5b5ef93c766b242c4ac14379f160b8df404398",
+      "2b4b07fddd5ceb83dc9af464718c8c8d6d628b9e79d1c25529b02480701ebc1c",
+      "cc17507a9cdeaa36ee5b16dd25384acaa8b1fdf16c755d7939cd05eb75128c52"
+    ],
+    "stateHash": "4a04728f3c3de9b35fae6a8cc54abe72387d13dfe052af7f3be355456b63026e"
+  },
+  "receipts": [
+    {
+      "seq": 1,
+      "op": "EFFECT",
+      "cell": "greet-0",
+      "prev": "genesis",
+      "payload": {
+        "text": "hello quilt"
+      },
+      "digest": "6b58a6b6839aab9fead4e2184a5b5ef93c766b242c4ac14379f160b8df404398"
+    },
+    {
+      "seq": 2,
+      "op": "EFFECT",
+      "cell": "greet-1",
+      "prev": "6b58a6b6839aab9fead4e2184a5b5ef93c766b242c4ac14379f160b8df404398",
+      "payload": {
+        "text": "hello organ"
+      },
+      "digest": "2b4b07fddd5ceb83dc9af464718c8c8d6d628b9e79d1c25529b02480701ebc1c"
+    },
+    {
+      "seq": 3,
+      "op": "EFFECT",
+      "cell": "greet-0",
+      "prev": "2b4b07fddd5ceb83dc9af464718c8c8d6d628b9e79d1c25529b02480701ebc1c",
+      "payload": {
+        "text": "hello quilt-organ"
+      },
+      "digest": "cc17507a9cdeaa36ee5b16dd25384acaa8b1fdf16c755d7939cd05eb75128c52"
+    }
+  ],
+  "schemaVersion": "quilt.organ.v1",
+  "state": {
+    "cells": {
+      "greet-0": {
+        "greetings": 2,
+        "last": "quilt"
+      },
+      "greet-1": {
+        "greetings": 1,
+        "last": "organ"
+      }
+    },
+    "emitted": 3,
+    "schema": "quilt.organ.v1"
+  }
+}
