@@ -33,8 +33,22 @@
  *      MISSING-ANCHOR verdict flips fleetHealth.state to DIVERGENCE-DETECTED.
  *      A tampered ANCHOR row (sha256 re-derivation fails) is CORRUPT-ANCHOR —
  *      the EXISTING corruption class, reported separately, never conflated.
- *   5. GET /status serves the dashboard: every last check + divergence detail
- *      + a fleet health summary. Open (CORS *) like the rest of the fleet.
+ *   5. TWO-NOTARY CROSS-CHECK (wave-68, 68-c): the fleet converged on TWO
+ *      independent tip notaries (Mavis's quilt-tip-anchor @ 08:08:17Z and our
+ *      quilt-tip-notary @ 16:57:55Z — the convergence event, receipted in
+ *      docs/convergence-receipt.md). For every lane known to EITHER notary,
+ *      each witness is read from ITS OWN KV namespace (ORGANS = shared organ
+ *      store; ANCHORS = Mavis's quilt-tip-anchors, bound directly because
+ *      worker→worker HTTP is platform-blocked) and verified under ITS OWN
+ *      integrity law (ours: sha256 content re-derivation; Mavis's: HMAC sig
+ *      under the shared token). Writes watch:_notaries:{lane} with a per-lane
+ *      `notaries` row [{notary, tip, state}] and a notaryAgreement verdict:
+ *      BOTH-MATCH / PARTIAL / NO-ANCHORS / NOTARY-DISAGREE — the last is the
+ *      alarm (two anchored tips for the same lane that DIFFER = divergence
+ *      signal amplified) and flips fleetHealth.state to DIVERGENCE-DETECTED.
+ *   6. GET /status serves the dashboard: every last check + divergence detail
+ *      + notary cross-check detail + a fleet health summary. Open (CORS *)
+ *      like the rest of the fleet.
  *
  * driftDetected: true  = a stored organ FAILED re-derivation (FINDING —
  *                        receipted, never deleted; the organ bytes are
@@ -46,11 +60,18 @@
  *   ORGANS               KV namespace — the SAME quilt-organ-store namespace the
  *                        organ-boot-loader and quilt-tip-notary use (read for
  *                        organs + anchors, write for watch rows)
- *   WORKER_UPLOAD_TOKEN  secret — guards POST /check (same shared fleet token)
+ *   ANCHORS              KV namespace — quilt-tip-anchors (Mavis's
+ *                        quilt-tip-notary sibling, wave-66): read-ONLY for the
+ *                        two-notary cross-check (latest:/index:/anchor: keys);
+ *                        the watcher never writes here
+ *   WORKER_UPLOAD_TOKEN  secret — guards POST /check AND verifies Mavis's HMAC
+ *                        anchor sigs (both notaries share the fleet token;
+ *                        wave-68 68-c aligned the tip-anchor to it)
  *   LOADER_URL           plain_text — informational: which loader this watcher monitors
  */
 
 import { divergenceSweep } from "./divergence.mjs";
+import { crossCheckSweep, loadNotaryRows, fleetAgreement } from "./crosscheck.mjs";
 
 const WATCH_PREFIX = "watch:";
 const LAST_RUN_KEY = "watch:_lastRun";
@@ -272,6 +293,17 @@ async function runCycle(env, trigger) {
     divergence.error = String(e && e.message ? e.message : e).slice(0, 300);
   }
 
+  // ---- TWO-NOTARY CROSS-CHECK (wave-68, 68-c) ------------------------------
+  // Runs after the divergence delta: reads BOTH notaries' KV namespaces and
+  // verdicts per-lane agreement (BOTH-MATCH / PARTIAL / NO-ANCHORS /
+  // NOTARY-DISAGREE — the alarm). Never deletes; writes watch:_notaries:{lane}.
+  let crosscheck = { lanes: [], notaryAgreement: null, summary: { lanesChecked: 0 }, error: null };
+  try {
+    crosscheck = await crossCheckSweep(env);
+  } catch (e) {
+    crosscheck.error = String(e && e.message ? e.message : e).slice(0, 300);
+  }
+
   const summary = {
     ranAt: new Date().toISOString(),
     trigger,
@@ -283,9 +315,14 @@ async function runCycle(env, trigger) {
     lanesTracked: divergence.lanes.length,
     divergences: divergence.divergences,
     anchorCorruption: divergence.corruptions,
+    notaryAgreement: crosscheck.notaryAgreement,
+    notaryLanesChecked: crosscheck.summary?.lanesChecked ?? 0,
+    notaryDisagreements: crosscheck.summary?.disagreements ?? 0,
+    notaryBothMatches: crosscheck.summary?.bothMatches ?? 0,
+    notaryFlawedRows: crosscheck.summary?.flawedRows ?? 0,
   };
   await env.ORGANS.put(LAST_RUN_KEY, JSON.stringify(summary));
-  return { summary, checks, divergence };
+  return { summary, checks, divergence, crosscheck };
 }
 
 async function statusPayload(env) {
@@ -323,6 +360,14 @@ async function statusPayload(env) {
   const healthy = records.filter((r) => r.driftDetected === false);
   const divergences = divergenceRecords.filter((r) => r.divergence === true);
   const anchorCorruption = divergenceRecords.filter((r) => r.verdict === "CORRUPT-ANCHOR");
+  let notaryRows = [];
+  try {
+    notaryRows = await loadNotaryRows(env.ORGANS);
+  } catch {
+    notaryRows = [];
+  }
+  const notaryAgreement = fleetAgreement(notaryRows);
+  const notaryDisagreements = notaryRows.filter((r) => r.notaryAgreement === "NOTARY-DISAGREE").length;
   const fleetHealth = {
     organsTracked: records.length,
     bootable: healthy.length,
@@ -331,10 +376,16 @@ async function statusPayload(env) {
     lanesTracked: divergenceRecords.length,
     divergences: divergences.length,
     anchorCorruption: anchorCorruption.length,
+    notaryAgreement,
+    notaryLanesChecked: notaryRows.length,
+    notaryDisagreements,
+    notaryBothMatches: notaryRows.filter((r) => r.notaryAgreement === "BOTH-MATCH").length,
+    notaryPartials: notaryRows.filter((r) => r.notaryAgreement === "PARTIAL").length,
+    notaryNoAnchors: notaryRows.filter((r) => r.notaryAgreement === "NO-ANCHORS").length,
     state:
-      records.length === 0 && divergenceRecords.length === 0
+      records.length === 0 && divergenceRecords.length === 0 && notaryRows.length === 0
         ? "no-checks-yet"
-        : divergences.length > 0
+        : divergences.length > 0 || notaryDisagreements > 0
           ? "DIVERGENCE-DETECTED"
           : drifted.length > 0 || anchorCorruption.length > 0
             ? "DRIFT-DETECTED"
@@ -350,8 +401,10 @@ async function statusPayload(env) {
     method: "independent server-side re-derivation of every stored organ's commitments (manifest digest, stateHash, receipt chain, dialect extras) — no code path shared with the loader",
     cadence: "hourly (cron 0 * * * *); POST /check with WORKER_UPLOAD_TOKEN forces a cycle",
     divergenceMethod: "per-lane current tip (GitHub raw chain files / this sweep's re-derived organ tips) vs the notary's anchored history (quilt-tip-notary, same KV) — corruption (re-derivation fails) and divergence (two honest states disagree) are reported as different classes",
+    crosscheckMethod: "TWO-NOTARY cross-check (wave-68): each lane known to either notary is verified against BOTH — quilt-tip-anchor (Mavis, ANCHORS KV, HMAC-sig law) and quilt-tip-notary (OURS KV, sha256 content law); per-lane notaries rows + fleetHealth.notaryAgreement (BOTH-MATCH/PARTIAL/NO-ANCHORS/NOTARY-DISAGREE — the alarm)",
     fleetHealth,
     divergence: divergenceRecords,
+    notaries: notaryRows,
     organs: records,
   };
 }
@@ -378,12 +431,12 @@ export default {
       return json({
         service: "organ-watcher",
         ok: true,
-        purpose: "fleet boot-readiness monitor + divergence detector: hourly independent re-verification of every organ in the organ-boot-loader store, plus per-lane anchored-tip vs current-tip comparison (quilt-tip-notary)",
+        purpose: "fleet boot-readiness monitor + divergence detector + two-notary cross-check: hourly independent re-verification of every organ in the organ-boot-loader store, per-lane anchored-tip vs current-tip comparison (quilt-tip-notary), and per-lane agreement across BOTH fleet notaries (quilt-tip-anchor + quilt-tip-notary)",
         endpoints: {
-          "GET /status": "dashboard: last check per organ + per-lane divergence detail + fleet health summary (open)",
+          "GET /status": "dashboard: last check per organ + per-lane divergence detail + per-lane two-notary agreement + fleet health summary incl. notaryAgreement (open)",
           "POST /check": "force one check cycle now (auth: WORKER_UPLOAD_TOKEN)",
         },
-        bindings: { ORGANS: "kv_namespace (shared quilt-organ-store: organs + notary anchors + watch rows)", WORKER_UPLOAD_TOKEN: "secret", LOADER_URL: "plain_text (informational)" },
+        bindings: { ORGANS: "kv_namespace (shared quilt-organ-store: organs + notary anchors + watch rows)", ANCHORS: "kv_namespace (quilt-tip-anchors, Mavis's notary — read-only for the cross-check)", WORKER_UPLOAD_TOKEN: "secret", LOADER_URL: "plain_text (informational)" },
         neverDeletes: "the watcher only writes watch:* rows; organ data and anchor rows are never touched",
       });
     }
@@ -396,8 +449,8 @@ export default {
       if (!(await authOk(request, env))) {
         return fail(401, "unauthorized — present WORKER_UPLOAD_TOKEN via 'Authorization: Bearer <token>' or 'x-quilt-token'");
       }
-      const { summary, divergence } = await runCycle(env, "manual");
-      return json({ ok: true, forced: true, summary, divergence, dashboard: await statusPayload(env) });
+      const { summary, divergence, crosscheck } = await runCycle(env, "manual");
+      return json({ ok: true, forced: true, summary, divergence, crosscheck, dashboard: await statusPayload(env) });
     }
 
     return fail(404, `no route: ${method} ${path}`);

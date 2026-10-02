@@ -158,6 +158,31 @@ Local proofs: `node --test tests/divergence.test.mjs` (tail truncation →
 REGRESSED, fork → ADVANCED, missing anchor → MISSING-ANCHOR, tampered anchor →
 corruption).
 
+### The two-notary cross-check (wave 68, `src/organ-watcher/crosscheck.mjs`)
+
+The fleet converged on TWO independent tip notaries within 9 hours of the
+wave-66 census naming the organ (Mavis's `quilt-tip-anchor` at 08:08:17Z, our
+`quilt-tip-notary` at 16:57:55Z) — see `docs/convergence-receipt.md`. After
+every cycle, the watcher reads EVERY lane known to EITHER notary from BOTH KV
+namespaces (`ORGANS` = shared organ store; `ANCHORS` = `quilt-tip-anchors`,
+bound read-only) and verifies each witness under ITS OWN integrity law (ours:
+sha256 content re-derivation; Mavis's: HMAC sig under the shared token). It
+writes `watch:_notaries:{lane}` with per-lane `notaries` rows
+`{notary, tip, state}` and a verdict:
+
+| `notaryAgreement` | meaning |
+|---|---|
+| `BOTH-MATCH` | ≥ 2 valid witnesses anchored the same tip — dual-witnessed |
+| `NOTARY-DISAGREE` | ≥ 2 valid witnesses anchored DIFFERENT tips for the same lane — **the alarm** (two chosen scars disagree); flips `fleetHealth.state` to `DIVERGENCE-DETECTED` |
+| `PARTIAL` | exactly 1 valid witness (single coverage; not a fault, not yet proof) |
+| `NO-ANCHORS` | 0 VALID witnesses (flawed rows — corrupt / `sig-unverifiable` — are receipted in the row detail, never counted) |
+
+`fleetHealth.notaryAgreement` = max severity across lanes (disagree >
+both-match > partial > no-anchors). Local proofs:
+`node --test tests/crosscheck.test.mjs` (both-match, live-shaped disagree,
+partial both directions, tampered sig/sha256 fail-closed, pinned HMAC vector,
+sweep-level fleet verdict).
+
 ## quilt-tip-notary endpoints
 
 | route | auth | behavior |

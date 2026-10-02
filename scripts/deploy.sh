@@ -125,20 +125,46 @@ print(json.dumps([
   {'type':'secret_text','name':'DEEPINFRA_API_KEY','text':os.environ['DEEPINFRA_API_KEY']},
 ]))")"
 
-# --- 4. organ-watcher (shared KV + WORKER_UPLOAD_TOKEN + LOADER_URL; cron hourly)
+# --- 4. organ-watcher (shared KV + Mavis's anchor KV + WORKER_UPLOAD_TOKEN + LOADER_URL; cron hourly)
 # Backlog item 1 (wave 64, 64-c): hourly re-verification of every organ in the
 # store + GET /status fleet dashboard. Shares the SAME KV namespace as the
 # loader (reads organ bytes, writes only watch:* rows — never deletes).
 # Wave 67 (67-a): the watcher gained the divergence delta and is now a 2-module
 # bundle (worker.js + divergence.mjs) — it MUST be uploaded as a multipart
 # module bundle or the import fails at boot.
+# Wave 68 (68-c): 3-module bundle (+ crosscheck.mjs, the two-notary
+# cross-check) with a second, READ-ONLY KV binding: ANCHORS = Mavis's
+# quilt-tip-anchors namespace (quilt-tip-anchor, wave-66) — each lane is
+# anchor-verified against BOTH notaries under each one's own integrity law.
+ANCHORS_KV_ID=$(CF_ACC="$ACCOUNT_ID" CF_TOK="$CLOUDFLARE_API_TOKEN" KV_TITLE="quilt-tip-anchors" python3 - <<'PYEOF'
+import json, os, urllib.request
+api = "https://api.cloudflare.com/client/v4"
+acct = os.environ["CF_ACC"]; tok = os.environ["CF_TOK"]; title = os.environ["KV_TITLE"]
+def call(method, path, body=None):
+    req = urllib.request.Request(api + path, method=method,
+        data=json.dumps(body).encode() if body else None,
+        headers={"Authorization": f"Bearer {tok}", "content-type": "application/json"})
+    with urllib.request.urlopen(req) as r: return json.load(r)
+page = 1; ns_id = ""
+while True:
+    d = call("GET", f"/accounts/{acct}/storage/kv/namespaces?per_page=100&page={page}")
+    for n in d["result"]:
+        if n["title"] == title: ns_id = n["id"]; break
+    if ns_id or page >= d["result_info"]["total_pages"]: break
+    page += 1
+if not ns_id: ns_id = call("POST", f"/accounts/{acct}/storage/kv/namespaces", {"title": title})["result"]["id"]
+print(ns_id)
+PYEOF
+)
+echo "KV namespace quilt-tip-anchors (Mavis's notary, read-only) = $ANCHORS_KV_ID"
 upload_worker "organ-watcher" "$ROOT/src/organ-watcher/worker.js" "$(python3 -c "
 import json, os
 print(json.dumps([
   {'type':'kv_namespace','name':'ORGANS','namespace_id':'$KV_ID'},
+  {'type':'kv_namespace','name':'ANCHORS','namespace_id':'$ANCHORS_KV_ID'},
   {'type':'secret_text','name':'WORKER_UPLOAD_TOKEN','text':os.environ['WORKER_UPLOAD_TOKEN']},
   {'type':'plain_text','name':'LOADER_URL','text':'https://organ-boot-loader.'+'$SUB'+'.workers.dev'},
-]))")" "src/organ-watcher/divergence.mjs"
+]))")" "src/organ-watcher/divergence.mjs" "src/organ-watcher/crosscheck.mjs"
 
 # cron trigger: hourly at :00 — free-tier friendly (24 cycles/day, ~2 KV writes
 # per organ per cycle + 1 summary row).
