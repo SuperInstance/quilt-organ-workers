@@ -3,6 +3,10 @@
  * (Cloudflare Worker, cron-triggered, KV-backed; free-tier friendly).
  *
  * Backlog item 1 from the quilt-organ-workers README, landed in wave 64 (64-c).
+ * Wave 67 (67-a) adds the DIVERGENCE DELTA (src/organ-watcher/divergence.mjs):
+ * after every cycle, anchored lane tips (quilt-tip-notary's KV keys) are
+ * compared against each lane's CURRENT tip — corruption (re-derivation fails)
+ * was the old disease; DIVERGENCE (two honest states disagree) is the new one.
  *
  * What it does, once per hour (cron "0 * * * *"; also forceable via POST /check):
  *   1. lists every organ id from the organ-boot-loader KV (meta:* keys — the SAME
@@ -19,10 +23,18 @@
  *      receipts/ORGAN-WATCHER.md; re-derivation is the sanctioned fallback per
  *      the 64-c mission and is strictly stronger for drift monitoring anyway.)
  *   3. records one KV row per organ: {id, name, dialect, bootable, checkedAt,
- *      driftDetected, ...} under key watch:{organId}, plus a watch:_lastRun
- *      summary row,
- *   4. GET /status serves the dashboard: every last check + a fleet health
- *      summary. Open (CORS *) like the rest of the fleet — no secrets in it.
+ *      driftDetected, receiptTip, ...} under key watch:{organId}, plus a
+ *      watch:_lastRun summary row,
+ *   4. DIVERGENCE DELTA: for each lane with anchored tips (quilt-tip-notary,
+ *      anchor:* / notary-latest:* keys in the SAME KV) ∪ each configured lane,
+ *      re-derives the lane's CURRENT tip (GitHub raw chain files / organ tips
+ *      from this sweep) and compares against the anchored history; writes one
+ *      watch:_divergence:{lane} row per lane. Any REGRESSED / ADVANCED /
+ *      MISSING-ANCHOR verdict flips fleetHealth.state to DIVERGENCE-DETECTED.
+ *      A tampered ANCHOR row (sha256 re-derivation fails) is CORRUPT-ANCHOR —
+ *      the EXISTING corruption class, reported separately, never conflated.
+ *   5. GET /status serves the dashboard: every last check + divergence detail
+ *      + a fleet health summary. Open (CORS *) like the rest of the fleet.
  *
  * driftDetected: true  = a stored organ FAILED re-derivation (FINDING —
  *                        receipted, never deleted; the organ bytes are
@@ -32,13 +44,17 @@
  *
  * Bindings:
  *   ORGANS               KV namespace — the SAME quilt-organ-store namespace the
- *                        organ-boot-loader uses (read for organs, write for watch rows)
+ *                        organ-boot-loader and quilt-tip-notary use (read for
+ *                        organs + anchors, write for watch rows)
  *   WORKER_UPLOAD_TOKEN  secret — guards POST /check (same shared fleet token)
  *   LOADER_URL           plain_text — informational: which loader this watcher monitors
  */
 
+import { divergenceSweep } from "./divergence.mjs";
+
 const WATCH_PREFIX = "watch:";
 const LAST_RUN_KEY = "watch:_lastRun";
+const DIVERGENCE_PREFIX = "watch:_divergence:";
 const ORGAN_META_PREFIX = "meta:";
 const LIST_PAGE_LIMIT = 64;
 const MAX_ORGANS = 512; // hard stop for free-tier discipline (KV reads/cycle <= ~2x this)
@@ -206,6 +222,7 @@ async function runCycle(env, trigger) {
   if (ids.length > MAX_ORGANS) ids.length = MAX_ORGANS;
 
   const checks = [];
+  const organTips = new Map(); // organId -> {tip, rows} — current tips for divergence sources of kind organ_store
   for (const id of ids) {
     const record = { id, checkedAt: new Date().toISOString() };
     const raw = await env.ORGANS.get(`organ:${id}`, { type: "json" }).catch(() => null);
@@ -218,6 +235,14 @@ async function runCycle(env, trigger) {
         record.rederived = verdict.checks;
         if (verdict.chainReason) record.reason = verdict.chainReason;
         record.driftDetected = verdict.bootable ? false : true;
+        if (verdict.bootable && Array.isArray(raw.bundle.receipts) && raw.bundle.receipts.length > 0) {
+          const last = raw.bundle.receipts[raw.bundle.receipts.length - 1];
+          const tip = typeof last?.hash === "string" ? last.hash : typeof last?.digest === "string" ? last.digest : null;
+          if (tip) {
+            record.receiptTip = tip;
+            organTips.set(id, { tip, rows: raw.bundle.receipts.length });
+          }
+        }
       } catch (e) {
         record.bootable = null;
         record.driftDetected = null;
@@ -234,6 +259,19 @@ async function runCycle(env, trigger) {
     checks.push(record);
   }
 
+  // ---- DIVERGENCE DELTA (wave-67): anchored tips vs current tips ----------
+  // Runs after the organ sweep so organ_store divergence sources can read the
+  // sweep's own re-derived receipt tips (organTips). A tampered ANCHOR row is
+  // CORRUPT-ANCHOR (corruption class — the existing disease); a REGRESSED /
+  // ADVANCED / MISSING-ANCHOR verdict is DIVERGENCE (two honest states
+  // disagreeing — the new disease this delta exists to name).
+  let divergence = { lanes: [], divergences: 0, corruptions: 0, checkedAt: null };
+  try {
+    divergence = await divergenceSweep(env, organTips);
+  } catch (e) {
+    divergence.error = String(e && e.message ? e.message : e).slice(0, 300);
+  }
+
   const summary = {
     ranAt: new Date().toISOString(),
     trigger,
@@ -242,18 +280,22 @@ async function runCycle(env, trigger) {
     bootable: checks.filter((c) => c.bootable === true).length,
     drifted: checks.filter((c) => c.driftDetected === true).length,
     indeterminate: checks.filter((c) => c.driftDetected === null).length,
+    lanesTracked: divergence.lanes.length,
+    divergences: divergence.divergences,
+    anchorCorruption: divergence.corruptions,
   };
   await env.ORGANS.put(LAST_RUN_KEY, JSON.stringify(summary));
-  return { summary, checks };
+  return { summary, checks, divergence };
 }
 
 async function statusPayload(env) {
   const records = [];
+  const divergenceRecords = [];
   let cursor;
   do {
     const page = await env.ORGANS.list({ prefix: WATCH_PREFIX, limit: LIST_PAGE_LIMIT, cursor });
     for (const key of page.keys) {
-      if (key.name === LAST_RUN_KEY) continue;
+      if (key.name.startsWith("watch:_")) continue; // _lastRun + _divergence:* are not organs
       const r = await env.ORGANS.get(key.name, { type: "json" }).catch(() => null);
       if (r) records.push(r);
     }
@@ -261,23 +303,44 @@ async function statusPayload(env) {
   } while (cursor && records.length < MAX_ORGANS);
   records.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
+  // divergence rows are under watch:_divergence:{lane} — a separate listing so
+  // the organs listing above never mixes the two.
+  cursor = undefined;
+  let dPages = 0;
+  do {
+    const page = await env.ORGANS.list({ prefix: DIVERGENCE_PREFIX, limit: LIST_PAGE_LIMIT, cursor });
+    for (const key of page.keys) {
+      const r = await env.ORGANS.get(key.name, { type: "json" }).catch(() => null);
+      if (r) divergenceRecords.push(r);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor && ++dPages < 16 && divergenceRecords.length < MAX_ORGANS);
+  divergenceRecords.sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0));
+
   const lastRun = await env.ORGANS.get(LAST_RUN_KEY, { type: "json" }).catch(() => null);
   const drifted = records.filter((r) => r.driftDetected === true);
   const indeterminate = records.filter((r) => r.driftDetected === null);
   const healthy = records.filter((r) => r.driftDetected === false);
+  const divergences = divergenceRecords.filter((r) => r.divergence === true);
+  const anchorCorruption = divergenceRecords.filter((r) => r.verdict === "CORRUPT-ANCHOR");
   const fleetHealth = {
     organsTracked: records.length,
     bootable: healthy.length,
     drifted: drifted.length,
     indeterminate: indeterminate.length,
+    lanesTracked: divergenceRecords.length,
+    divergences: divergences.length,
+    anchorCorruption: anchorCorruption.length,
     state:
-      records.length === 0
+      records.length === 0 && divergenceRecords.length === 0
         ? "no-checks-yet"
-        : drifted.length > 0
-          ? "DRIFT-DETECTED"
-          : indeterminate.length > 0
-            ? "degraded-indeterminate"
-            : "healthy",
+        : divergences.length > 0
+          ? "DIVERGENCE-DETECTED"
+          : drifted.length > 0 || anchorCorruption.length > 0
+            ? "DRIFT-DETECTED"
+            : indeterminate.length > 0
+              ? "degraded-indeterminate"
+              : "healthy",
     lastRun: lastRun ?? null,
   };
   return {
@@ -286,7 +349,9 @@ async function statusPayload(env) {
     loaderUrl: env.LOADER_URL ?? null,
     method: "independent server-side re-derivation of every stored organ's commitments (manifest digest, stateHash, receipt chain, dialect extras) — no code path shared with the loader",
     cadence: "hourly (cron 0 * * * *); POST /check with WORKER_UPLOAD_TOKEN forces a cycle",
+    divergenceMethod: "per-lane current tip (GitHub raw chain files / this sweep's re-derived organ tips) vs the notary's anchored history (quilt-tip-notary, same KV) — corruption (re-derivation fails) and divergence (two honest states disagree) are reported as different classes",
     fleetHealth,
+    divergence: divergenceRecords,
     organs: records,
   };
 }
@@ -300,7 +365,6 @@ export default {
       )
     );
   },
-
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -314,13 +378,13 @@ export default {
       return json({
         service: "organ-watcher",
         ok: true,
-        purpose: "fleet boot-readiness monitor: hourly independent re-verification of every organ in the organ-boot-loader store",
+        purpose: "fleet boot-readiness monitor + divergence detector: hourly independent re-verification of every organ in the organ-boot-loader store, plus per-lane anchored-tip vs current-tip comparison (quilt-tip-notary)",
         endpoints: {
-          "GET /status": "dashboard: last check per organ + fleet health summary (open)",
+          "GET /status": "dashboard: last check per organ + per-lane divergence detail + fleet health summary (open)",
           "POST /check": "force one check cycle now (auth: WORKER_UPLOAD_TOKEN)",
         },
-        bindings: { ORGANS: "kv_namespace (shared quilt-organ-store)", WORKER_UPLOAD_TOKEN: "secret", LOADER_URL: "plain_text (informational)" },
-        neverDeletes: "the watcher only writes watch:* rows; organ data is never touched",
+        bindings: { ORGANS: "kv_namespace (shared quilt-organ-store: organs + notary anchors + watch rows)", WORKER_UPLOAD_TOKEN: "secret", LOADER_URL: "plain_text (informational)" },
+        neverDeletes: "the watcher only writes watch:* rows; organ data and anchor rows are never touched",
       });
     }
 
@@ -332,8 +396,8 @@ export default {
       if (!(await authOk(request, env))) {
         return fail(401, "unauthorized — present WORKER_UPLOAD_TOKEN via 'Authorization: Bearer <token>' or 'x-quilt-token'");
       }
-      const { summary } = await runCycle(env, "manual");
-      return json({ ok: true, forced: true, summary, dashboard: await statusPayload(env) });
+      const { summary, divergence } = await runCycle(env, "manual");
+      return json({ ok: true, forced: true, summary, divergence, dashboard: await statusPayload(env) });
     }
 
     return fail(404, `no route: ${method} ${path}`);

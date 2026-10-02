@@ -84,14 +84,17 @@ with os.fdopen(fd, "w") as f:
 PYEOF
 }
 
-upload_worker() { # $1 = script name, $2 = worker.js path, $3 = bindings JSON array
-  local name="$1" src="$2" bindings="$3"
+upload_worker() { # $1 = script name, $2 = main module path, $3 = bindings JSON array, $4+ = extra module paths (bundle parts, uploaded under their basenames)
+  local name="$1" src="$2" bindings="$3"; shift 3
   local meta; meta=$(mktemp /tmp/qow-meta-XXXXXX)
   write_meta "$meta" "worker.js" "$bindings"
+  local form=( -F "metadata=<${meta};type=application/json" -F "worker.js=@${src};type=application/javascript+module" )
+  local extra
+  for extra in "$@"; do
+    form+=( -F "$(basename "$extra")=@${ROOT}/${extra};type=application/javascript+module" )
+  done
   local resp
-  resp=$(curl -sfS -X PUT "${auth[@]}" \
-    -F "metadata=<${meta};type=application/json" \
-    -F "worker.js=@${src};type=application/javascript+module" \
+  resp=$(curl -sfS -X PUT "${auth[@]}" "${form[@]}" \
     "$API/accounts/$ACCOUNT_ID/workers/scripts/$name")
   rm -f "$meta"
   echo "$resp" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['success'], d; print('deployed', '$name', 'bindings:', sorted(b['name'] for b in d['result'].get('bindings',[])))"
@@ -126,13 +129,16 @@ print(json.dumps([
 # Backlog item 1 (wave 64, 64-c): hourly re-verification of every organ in the
 # store + GET /status fleet dashboard. Shares the SAME KV namespace as the
 # loader (reads organ bytes, writes only watch:* rows — never deletes).
+# Wave 67 (67-a): the watcher gained the divergence delta and is now a 2-module
+# bundle (worker.js + divergence.mjs) — it MUST be uploaded as a multipart
+# module bundle or the import fails at boot.
 upload_worker "organ-watcher" "$ROOT/src/organ-watcher/worker.js" "$(python3 -c "
 import json, os
 print(json.dumps([
   {'type':'kv_namespace','name':'ORGANS','namespace_id':'$KV_ID'},
   {'type':'secret_text','name':'WORKER_UPLOAD_TOKEN','text':os.environ['WORKER_UPLOAD_TOKEN']},
   {'type':'plain_text','name':'LOADER_URL','text':'https://organ-boot-loader.'+'$SUB'+'.workers.dev'},
-]))")"
+]))")" "src/organ-watcher/divergence.mjs"
 
 # cron trigger: hourly at :00 — free-tier friendly (24 cycles/day, ~2 KV writes
 # per organ per cycle + 1 summary row).
@@ -141,8 +147,20 @@ curl -sfS -X PUT "${auth[@]}" -H 'content-type: application/json' \
   "$API/accounts/$ACCOUNT_ID/workers/scripts/organ-watcher/schedules" > /dev/null
 echo "cron schedule set for organ-watcher: 0 * * * * (hourly)"
 
+# --- 5. quilt-tip-notary (wave-67, 67-a: shared KV + WORKER_UPLOAD_TOKEN) ------
+# Backlog item 4 ("receipt-anchor"): the fleet's external tip notary — per-lane,
+# per-day anchored 32-byte tips in the SHARED organ store (anchor:{lane}:{day},
+# notary-latest:{lane}), content-addressed, never deleted. 2-module bundle.
+upload_worker "quilt-tip-notary" "$ROOT/src/tip-notary/worker.js" "$(python3 -c "
+import json, os
+print(json.dumps([
+  {'type':'kv_namespace','name':'ORGANS','namespace_id':'$KV_ID'},
+  {'type':'secret_text','name':'WORKER_UPLOAD_TOKEN','text':os.environ['WORKER_UPLOAD_TOKEN']},
+]))")" "src/tip-notary/logic.mjs"
+
 echo
 echo "organ-boot-loader: https://organ-boot-loader.$SUB.workers.dev"
 echo "judge-relay:       https://judge-relay.$SUB.workers.dev"
 echo "organ-watcher:     https://organ-watcher.$SUB.workers.dev"
+echo "quilt-tip-notary:  https://quilt-tip-notary.$SUB.workers.dev"
 echo "DEPLOY_TS=$(date -u +%FT%TZ)"
