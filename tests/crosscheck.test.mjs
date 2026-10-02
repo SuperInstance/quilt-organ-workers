@@ -238,12 +238,15 @@ test("crossCheckSweep over fixture KVs: qmr1 BOTH-MATCH, erised-sequencer:anchor
   assert.equal(result.summary.flawedRows, 1);
 
   // rows persisted, loadable, and nothing deleted
-  // (4 lanes: qmr1, fork-lane, erised-sequencer:anchor-proof, + LANE_CONFIG's
-  // erised-ft1 which has no fixture anchors -> NO-ANCHORS, unanchored both)
+  // (5 lanes: qmr1, fork-lane, erised-sequencer:anchor-proof, + LANE_CONFIG's
+  // erised-ft1 and chrono (73-h), neither of which has fixture anchors ->
+  // NO-ANCHORS, unanchored both)
   const loaded = await loadNotaryRows(oursKv);
-  assert.equal(loaded.length, 4);
+  assert.equal(loaded.length, 5);
   assert.equal(byLane.get("erised-ft1").notaryAgreement, "NO-ANCHORS");
   assert.equal(byLane.get("erised-ft1").notaries.every((n) => n.state === "unanchored"), true);
+  assert.equal(byLane.get("chrono").notaryAgreement, "NO-ANCHORS");
+  assert.equal(byLane.get("chrono").notaries.every((n) => n.state === "unanchored"), true);
   assert.equal(fleetAgreement(loaded), "NOTARY-DISAGREE");
   assert.ok([...oursKv._m.keys()].every((k) => oursKv._m.has(k))); // nothing vanished
 });

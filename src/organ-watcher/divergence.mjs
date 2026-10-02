@@ -58,6 +58,9 @@
  *   erised-ledger: row tip = sha256(seq + "|" + op + "|" + canon(payload) + "|"
  *                  + prev + "|" + sticky), canon = top-level key-sorted
  *                  stringify, prev starts "genesis", tip = last row tip.
+ *   chrono:        link hash = sha256(canonical({seq, op, prev})), op = the
+ *                  entry verbatim, genesis prev = "GENESIS", tip = last link
+ *                  hash (wave-73 73-h; the seal law a chrono checkpoint covers).
  */
 
 export const LANE_CONFIG = {
@@ -76,6 +79,14 @@ export const LANE_CONFIG = {
     path: "ledger/session.json",
     dialect: "erised-ledger",
     note: "erised-fleet-table's 73-receipt session ledger; tip re-derived per erised-sequencer engine.mjs (and cross-checked against the file's own verify.tip).",
+  },
+  chrono: {
+    source: "github_raw",
+    repo: "SuperInstance/quilt-chrono",
+    branch: "main",
+    path: "examples/tide/outputs/ledger.jsonl",
+    dialect: "chrono",
+    note: "quilt-chrono's committed tide-demo ledger — the DERIVABLE tip of what IS committed (the live chrono ledger is runtime-only; the .chain.jsonl seal sidecar is runtime-only too, but the chain re-derives from the committed ledger by the seal law). Wave-73 73-h anchors this tip as lane 'chrono' in BOTH notaries. Tip re-derived per src/seal.js: link hash = sha256(canonical({seq, op, prev})), genesis prev 'GENESIS', tip = last link hash (bare hex64).",
   },
 };
 
@@ -165,9 +176,68 @@ export async function deriveErisedTip(text) {
   return { ok: true, tip: prev, rows: ops.length };
 }
 
+/**
+ * chrono (quilt-chrono src/ledger.js loadLedger + src/seal.js entryLink law):
+ * returns {ok, tip, rows} or {ok:false, reason}.
+ *
+ * The watcher shares NO code path with the watched — the law is restated here
+ * (wave-73 73-h, the derived-projection watch). Two laws, both fail-closed:
+ *
+ *   ENTRY law (loadLedger, 0-based):
+ *     seq === line index (gapless, LEDGER_GAP), ts_utc a string strictly
+ *     greater than the previous line's (LEDGER_TIME_REGRESS), op ∈
+ *     {read, write} and cause ∈ the ten-entry cause set, line parseable
+ *     (LEDGER_BAD_ENTRY).
+ *
+ *   LINK law (seal.js entryLink/linkHash, the law a chrono SEAL covers):
+ *     hash = sha256(canonical({seq, op, prev})) where op is the entry object
+ *     VERBATIM (canonical = recursive key-sorted JSON), genesis prev =
+ *     "GENESIS" (the bare string, CHAIN_GENESIS), tip = last link's hash
+ *     (bare hex64). The committed ledger carries NO hashes — the .chain.jsonl
+ *     sidecar is derived data — so a tampered VALUE re-derives fine with a
+ *     DIFFERENT tip: that is a fork signature, caught as ADVANCED divergence
+ *     against the anchored tip (the notaries' whole job), not as corruption.
+ */
+export async function deriveChronoTip(text) {
+  const lines = text.split("\n").filter((l) => l.trim() !== "");
+  if (lines.length === 0) return { ok: false, reason: "chrono ledger is empty" };
+  const GENESIS = "GENESIS";
+  const OPS = new Set(["read", "write"]);
+  const CAUSES = new Set([
+    "init", "set", "step", "pull", "push", "evaluate",
+    "push-throttled", "tide-flush", "correction", "restore",
+  ]);
+  let prev = GENESIS;
+  let tip = null;
+  let lastTs = null;
+  for (let i = 0; i < lines.length; i++) {
+    let e;
+    try {
+      e = JSON.parse(lines[i]);
+    } catch {
+      return { ok: false, reason: `chrono line ${i + 1} is not valid JSON (LEDGER_BAD_ENTRY class)` };
+    }
+    if (e.seq !== i) return { ok: false, reason: `chrono line ${i + 1}: seq ${JSON.stringify(e.seq)} != ${i} (LEDGER_GAP class)` };
+    if (!OPS.has(e.op)) return { ok: false, reason: `chrono line ${i + 1}: bad op ${JSON.stringify(e.op)} (LEDGER_BAD_ENTRY class)` };
+    if (!CAUSES.has(e.cause)) return { ok: false, reason: `chrono line ${i + 1}: bad cause ${JSON.stringify(e.cause)} (LEDGER_BAD_ENTRY class)` };
+    if (typeof e.ts_utc !== "string") {
+      return { ok: false, reason: `chrono line ${i + 1}: ts_utc is not a string (LEDGER_BAD_ENTRY class)` };
+    }
+    if (lastTs !== null && !(e.ts_utc > lastTs)) {
+      return { ok: false, reason: `chrono line ${i + 1}: ts ${e.ts_utc} not after ${lastTs} (LEDGER_TIME_REGRESS class)` };
+    }
+    const hash = await sha256hex(canonical({ seq: e.seq, op: e, prev }));
+    lastTs = e.ts_utc;
+    prev = hash;
+    tip = hash;
+  }
+  return { ok: true, tip, rows: lines.length };
+}
+
 export async function deriveTipForDialect(dialect, text) {
   if (dialect === "qmr1") return deriveQmr1Tip(text);
   if (dialect === "erised-ledger") return deriveErisedTip(text);
+  if (dialect === "chrono") return deriveChronoTip(text);
   return { ok: false, reason: `unknown dialect "${dialect}"` };
 }
 
