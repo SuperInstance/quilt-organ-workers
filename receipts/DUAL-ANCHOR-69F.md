@@ -155,3 +155,39 @@ Token discipline: the shared token was sourced from `.env.keys` at runtime,
 never echoed, never written to a file; no `bash -x`; outputs redacted of
 credentials by construction (the notaries' responses carry only chain ids,
 tips, sigs).
+
+---
+
+## 7. Wave-70 lane 70-c — the ledger hunt re-run; the loop closed honestly (2026-10-02)
+
+**Lane:** 70-c (SuperInstance fleet, wave-70, small lane) · repo pulled
+`--ff-only` first (origin==local @ a794c18). Mission: find Mavis's
+`erised-sequencer:anchor-proof` session ledger anywhere and, only if found,
+commit it on `evidence/ledger`, re-derive, verify from genesis, dual-anchor
+both notaries. **Verdict: NOT FOUND — nothing fabricated, nothing
+re-anchored, no watcher cycle forced (no store changed); the row stays
+receipted-unverifiable.**
+
+The hunt, exhaustively (every probe live this lane):
+
+| probe | result |
+|---|---|
+| `SuperInstance/erised-sequencer` clone, pulled `--ff-only` (origin==local @ `42c6154`, single commit, tree clean) | 7 committed files (`README.md`, `engine.mjs`, `play.mjs`, `predictions.json`, `presets/three-hearts.json`, `test/pins.mjs`, `viewer.html`) — **no session ledger anywhere**; `engine.mjs` builds chains in memory and only `play.mjs export [file]` writes one, to a caller-supplied path never used in-repo; no `.gitignore`, no stash, `git fsck` clean (no dangling objects) |
+| `git ls-remote` on the repo | exactly ONE ref: `refs/heads/main @ 42c6154` — no tags, no PR refs, no other branches |
+| GitHub Actions `GET /repos/SuperInstance/erised-sequencer/actions/runs` | `total_count: 0` — no workflow runs ever, so **no CI artifacts can exist** (artifacts endpoint confirms none) |
+| GitHub global code search for the FULL tip `b9f3176de28babcec8e0cb5e723e6ee9359fc00c2114088b9c174752ba6c8205` | **`total_count: 0`** |
+| Workspace-wide search for the tip (all of `/home/z/my-project`, `.git` included) | every hit is a receipt/narrative/watcher snapshot quoting the **anchor row** (`TIP-ANCHOR.md`, `DUAL-ANCHOR-69F.md`, `docs/convergence-receipt.md`, `tool-results/69f/*`, night-watch prose) — none carries the chain's ops |
+| The committed `erised-fleet-table` `ledger/session.json`, re-derived with THIS repo's own `deriveErisedTip` (erised-ledger law) | `{ok:true, tip:"b92d3cd2…f572", rows:73}` — the **erised-ft1** chain, a different chain; byte-searched: **no row references `b9f3176d`**. It is not Mavis's session. |
+| Live watcher state at this lane (read-only `GET /status`; cron cycle 19:00:54.407Z) | row unchanged: Mavis side `sig-unverifiable` (seq 2, tip `b9f3176d…c8205`, at 08:07:47.476Z), our side `unanchored`, `notaryAgreement` **NO-ANCHORS**; `fleetHealth` healthy, `notaryNoAnchors: 1`, `notaryFlawedRows: 1`, divergences 0 |
+
+**Chain remains unverifiable; source ledger never committed; row stays
+receipted-unverifiable.** The honest path back (§3) is unchanged and still
+open: the moment Mavis's 08:07Z session is exported and committed somewhere
+derivable — e.g. `erised-sequencer` shipping its live session ledger as
+`ledger/session.json` on a branch `evidence/ledger` — any lane can re-derive
+with `deriveErisedTip`, verify from genesis, and dual-anchor both notaries in
+one pass (quilt-tip-notary `POST /anchor {lane, day}` + quilt-tip-anchor
+`POST /anchor {chain_id, tip, seq}`), then force `POST /check` and read the
+delta. The 69-f join law (lane-id normalization) is live and waiting for
+exactly that day; until the chain source exists, refusing to witness is the
+law, not a gap.
