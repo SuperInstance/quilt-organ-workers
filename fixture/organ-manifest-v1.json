@@ -1,0 +1,86 @@
+{
+  "schema": "quilt.organ.manifest/v1",
+  "manifest": {
+    "author": "lane-64-c",
+    "cells": [
+      {
+        "id": "greet-0",
+        "kind": "greeter",
+        "entry": "greet",
+        "stateHash": "74defab83d98f592dd6eb38e43f251362bed2f556c78b824dfc8fc24bf98e92c"
+      },
+      {
+        "id": "greet-1",
+        "kind": "greeter",
+        "entry": "greet",
+        "stateHash": "30791d97c36e39aa8dbff187785197a9781b1ed180c08881ac880fdaea4eb5cf"
+      }
+    ],
+    "createdAt": "2026-10-02T00:00:00Z",
+    "edges": [],
+    "genesis": {
+      "seq": 0,
+      "prevHash": "GENESIS"
+    },
+    "name": "greeter-organ",
+    "receiptRange": {
+      "start": 0,
+      "end": 2,
+      "count": 3
+    },
+    "schema": "quilt.organ.manifest",
+    "schemaVersion": 1,
+    "state": {
+      "cellsSha256": "59f6d316355364ec50b75378577423e2a4c4baec0218166e0954a8a211ad74d0"
+    },
+    "stateHash": "d827e6a7e17acae83f40b051f98c5963d8a7eb97c402bba4d4346479aac4e736",
+    "supersedes": null,
+    "organId": "greeter-organ@d889ea55b2e46717",
+    "manifestHash": "c3b614ee2cd6a51e5b6ebc21598b67d506936ce40707a9f92efb79a252f7ae21"
+  },
+  "state": {
+    "cells": {
+      "greet-0": {
+        "greetings": 2,
+        "last": "quilt"
+      },
+      "greet-1": {
+        "greetings": 1,
+        "last": "organ"
+      }
+    },
+    "emitted": 3
+  },
+  "receipts": [
+    {
+      "seq": 0,
+      "op": {
+        "type": "EFFECT",
+        "cell": "greet-0",
+        "text": "hello quilt"
+      },
+      "prev": "GENESIS",
+      "hash": "0929f26a0d1653d956dd451720aa9e73a7d71e15d0cbe96209fee66ab4fb3b5c"
+    },
+    {
+      "seq": 1,
+      "op": {
+        "type": "EFFECT",
+        "cell": "greet-1",
+        "text": "hello organ"
+      },
+      "prev": "0929f26a0d1653d956dd451720aa9e73a7d71e15d0cbe96209fee66ab4fb3b5c",
+      "hash": "86176b8c55c1d36e6227abee345b2a3ec3edd9ba4c3591f0ce39d910447bd5bb"
+    },
+    {
+      "seq": 2,
+      "op": {
+        "type": "EFFECT",
+        "cell": "greet-0",
+        "text": "hello quilt-organ"
+      },
+      "prev": "86176b8c55c1d36e6227abee345b2a3ec3edd9ba4c3591f0ce39d910447bd5bb",
+      "hash": "b740cbf10b03079e3a281561f5666bbfb0a5d5f890383048ad042e2b9c653f21"
+    }
+  ]
+}

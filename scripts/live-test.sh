@@ -11,6 +11,7 @@ source "$ENV_KEYS"
 
 BASE_LOADER="https://organ-boot-loader.casey-digennaro.workers.dev"
 BASE_JUDGE="https://judge-relay.casey-digennaro.workers.dev"
+BASE_WATCHER="https://organ-watcher.casey-digennaro.workers.dev"
 AUTH=(-H "Authorization: Bearer $WORKER_UPLOAD_TOKEN")
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$ROOT/fixture/greeter-organ.json"
@@ -85,14 +86,59 @@ curl -sS -o /tmp/lt-schema-resp.json -w "HTTP %{http_code}\n" -X PUT "${AUTH[@]}
 step "12. GET /organ/0000...0000/verify (expect 404)"
 curl -sS -o /tmp/lt-404.json -w "HTTP %{http_code}\n" "$BASE_LOADER/organ/$(printf '0%.0s' $(seq 1 64))/verify"; cat /tmp/lt-404.json
 
-step "13. judge-relay GET /health (no auth)"
+step "12b. PUT legacy dialect again — response must carry x-quilt-schema-deprecated (L15 transition)"
+curl -sS -D /tmp/lt-legacy-headers.txt -o /tmp/lt-legacy-body.json -w "HTTP %{http_code}\n" -X PUT "${AUTH[@]}" -H 'content-type: application/json' --data-binary @"$FIXTURE" "$BASE_LOADER/organ"
+grep -iE "^x-quilt-schema-deprecated" /tmp/lt-legacy-headers.txt || echo "MISSING deprecation header ✗"
+grep -o '"dialect": "[^"]*"' /tmp/lt-legacy-body.json || true
+
+FIXTURE_V1="$ROOT/fixture/organ-manifest-v1.json"
+
+step "13. PUT CANONICAL dialect (quilt.organ.manifest/v1) — expect 201 + x-quilt-schema header"
+curl -sS -D /tmp/lt-canon-headers.txt -o /tmp/lt-canon.json -w "HTTP %{http_code}\n" -X PUT "${AUTH[@]}" -H 'content-type: application/json' --data-binary @"$FIXTURE_V1" "$BASE_LOADER/organ"
+grep -iE "^x-quilt-schema:" /tmp/lt-canon-headers.txt || echo "MISSING x-quilt-schema header ✗"
+cat /tmp/lt-canon.json
+
+step "14. GET /organ/<canonical id>/verify — must report which dialect was served"
+CANON_ID=$(node -e '
+import("node:crypto").then(({createHash})=>{
+const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+function canonical(v){if(v===null||typeof v!=="object")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(canonical).join(",")+"]";const ks=Object.keys(v).sort();return "{"+ks.map(k=>JSON.stringify(k)+":"+canonical(v[k])).join(",")+"}";}
+console.log(createHash("sha256").update(canonical(b.manifest),"utf8").digest("hex"));
+});' "$FIXTURE_V1")
+curl -sS "$BASE_LOADER/organ/$CANON_ID/verify"; echo
+
+step "15. negative: canonical bundle with tampered receipt (expect 400)"
+python3 - "$FIXTURE_V1" > /tmp/lt-canon-tampered.json <<'PYEOF'
+import json, sys
+b = json.load(open(sys.argv[1]))
+b["receipts"][1]["op"]["text"] = "forged"
+print(json.dumps(b))
+PYEOF
+curl -sS -o /tmp/lt-canon-tampered-resp.json -w "HTTP %{http_code}\n" -X PUT "${AUTH[@]}" -H 'content-type: application/json' --data-binary @/tmp/lt-canon-tampered.json "$BASE_LOADER/organ"; cat /tmp/lt-canon-tampered-resp.json
+
+step "16. organ-watcher GET / (index)"
+curl -sS "$BASE_WATCHER/" | head -c 600; echo
+
+step "17. organ-watcher GET /status (before forced cycle)"
+curl -sS "$BASE_WATCHER/status"; echo
+
+step "18. organ-watcher POST /check WITHOUT auth (expect 401)"
+curl -sS -o /tmp/lt-w401.json -w "HTTP %{http_code}\n" -X POST "$BASE_WATCHER/check"; cat /tmp/lt-w401.json
+
+step "19. organ-watcher POST /check with auth — FORCE one check cycle"
+curl -sS -o /tmp/lt-wcheck.json -w "HTTP %{http_code}\n" -X POST "${AUTH[@]}" "$BASE_WATCHER/check"; cat /tmp/lt-wcheck.json
+
+step "20. organ-watcher GET /status (after forced cycle — the receipted dashboard)"
+curl -sS "$BASE_WATCHER/status"; echo
+
+step "21. judge-relay GET /health (no auth)"
 curl -sS "$BASE_JUDGE/health"; echo
 
-step "14. POST /judge WITHOUT auth (expect 401)"
+step "22. POST /judge WITHOUT auth (expect 401)"
 curl -sS -o /tmp/lt-j401.json -w "HTTP %{http_code}\n" -X POST -H 'content-type: application/json' \
   -d '{"candidate":"x","rubric":"y","judges":[{"model":"Hermes-3-405B"}]}' "$BASE_JUDGE/judge"; cat /tmp/lt-j401.json
 
-step "15. POST /judge with auth — 1 judge, max_tokens 64 (expect verdict + score)"
+step "23. POST /judge with auth — 1 judge, max_tokens 64 (expect verdict + score)"
 curl -sS -o /tmp/lt-judge.json -w "HTTP %{http_code}\n" -X POST "${AUTH[@]}" -H 'content-type: application/json' \
   --data-binary @- "$BASE_JUDGE/judge" <<'JEOF'
 {
@@ -104,7 +150,7 @@ curl -sS -o /tmp/lt-judge.json -w "HTTP %{http_code}\n" -X POST "${AUTH[@]}" -H 
 JEOF
 cat /tmp/lt-judge.json
 
-step "16. POST /judge with 2 judges (aggregate across models, max_tokens 64)"
+step "24. POST /judge with 2 judges (aggregate across models, max_tokens 64)"
 curl -sS -o /tmp/lt-judge2.json -w "HTTP %{http_code}\n" -X POST "${AUTH[@]}" -H 'content-type: application/json' \
   --data-binary @- "$BASE_JUDGE/judge" <<'JEOF'
 {

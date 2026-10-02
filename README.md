@@ -1,71 +1,122 @@
 # quilt-organ-workers
 
 Cloudflare Workers serving the SuperInstance fleet's **quilt-organ** concept:
-*saved-state bundles bootable by others*. Two serverless pieces, free-tier only,
-CORS-open so any lane agent anywhere can boot organs or call judges — no local
-model access, no wrangler login, keys only as Worker secrets.
+*saved-state bundles bootable by others*. Three serverless pieces, free-tier only,
+CORS-open so any lane agent anywhere can boot organs, call judges, or read fleet
+organ health — no local model access, no wrangler login, keys only as Worker
+secrets.
 
 - **organ-boot-loader** — content-addressed store for organ bundles
-  (manifest + state + receipt range). Upload is schema-validated server-side;
+  (manifest + state + receipts). Upload is schema-validated server-side;
   boot-readiness (`/verify`) is re-derived server-side. Principal's
   "saved state bootable by others", made serverless.
 - **judge-relay** — fans a candidate out to judge models on DeepInfra
   (OpenAI-compatible) and returns per-judge verdicts + an aggregated score.
   Principal's "compose with some models, test with others", made serverless.
+- **organ-watcher** — hourly cron monitor: independently re-derives every
+  stored organ's commitments (manifest digest, stateHash, receipt chain under
+  the organ's own dialect law, canonical extras) and publishes a fleet health
+  dashboard at `GET /status`. The fleet's boot-readiness monitor.
 
 | worker | URL |
 |---|---|
 | organ-boot-loader | https://organ-boot-loader.casey-digennaro.workers.dev |
 | judge-relay | https://judge-relay.casey-digennaro.workers.dev |
+| organ-watcher | https://organ-watcher.casey-digennaro.workers.dev |
 
-Deployment receipts: `receipts/DEPLOYMENT.md`.
+Deployment receipts: `receipts/DEPLOYMENT.md` (wave 63),
+`receipts/DIALECT-UNIFICATION.md` (wave 64, L15), `receipts/ORGAN-WATCHER.md`
+(wave 64).
 
-## quilt.organ.v1 — the bundle contract
+## THE canonical dialect: quilt.organ.manifest/v1 (L15 unification)
+
+There was exactly one registered schema string since wave 64 — **read
+`schema/organ-manifest.v1.json` before uploading** — plus a shared fixture both
+implementations validate against (`scripts/validate-dialect.mjs`, 38/38).
+Zero-shot uploaders: emit THIS shape.
 
 ```jsonc
 {
-  "schemaVersion": "quilt.organ.v1",
+  "schema": "quilt.organ.manifest/v1",                // THE registered string (bundle.schema)
   "manifest": {
+    "schema": "quilt.organ.manifest",                  // toolkit manifest law, verbatim
+    "schemaVersion": 1,
+    "organId": "greeter-organ@d889ea55b2e46717",      // name@16hex; 16hex = sha256(canon({name, material: stateHash})).slice(0,16)
     "name": "greeter-organ",
-    "cells": [ { "id": "greet-0", "kind": "greeter", "entry": "greet" } ],  // required, non-empty
-    "receiptRange": [ "<sha256hex>", ... ],                                  // required, ordered receipt digests
-    "stateHash": "<sha256hex>",       // = sha256(canonicalJSON(state))
-    "createdAt": "2026-10-02T00:00:00Z",
-    "author": "lane-63-e"
+    "cells": [ { "id": "greet-0", "kind": "greeter", "stateHash": "<hex64 per-cell>" } ],  // non-empty, unique ids
+    "edges": [],
+    "receiptRange": { "start": 0, "end": 2, "count": 3 },
+    "genesis": { "seq": 0, "prevHash": "GENESIS" },
+    "state": { "cellsSha256": "<hex64 of state.cells>" },
+    "stateHash": "<hex64 of the WHOLE state>",        // registered extension (worker heritage)
+    "supersedes": null,
+    "manifestHash": "<hex64 self-cover: sha256(canon(manifest minus manifestHash))>"
   },
-  "state": { "cells": { "...": {} }, "emitted": 3 },
-  "receipts": [                        // optional but verified when present
-    { "seq": 1, "op": "EFFECT", "cell": "greet-0", "prev": "genesis", "payload": {...}, "digest": "<sha256hex>" }
+  "state": { "cells": { "...": {} } },
+  "receipts": [                                        // optional but verified when present; full window required
+    { "seq": 0, "op": { "type": "EFFECT", "cell": "greet-0", "text": "hello quilt" },
+      "prev": "GENESIS", "hash": "<hex64 = sha256(canon({seq, op, prev}))>" }
   ]
 }
 ```
 
-Rules (all enforced server-side on PUT, re-derived on `/verify`):
+- **canonical JSON** = recursive key-sorted, no whitespace, FAIL-CLOSED on
+  undefined / NaN / Infinity / bigint / function / symbol (identical bytes in
+  `quilt-jev-toolkit canonicalJson`, the worker `canonical()`, and
+  `fixture/make-organ-manifest-fixture.mjs` — proven byte-equal by the harness).
+- **organ id** (store content address) = `sha256hex(canonicalJSON(manifest))`
+  over the FULL manifest including its internal `manifestHash` — derived by the
+  SERVER, never client-chosen; identical manifest ⇒ identical id (PUT
+  idempotent), GET answers immutable.
+- **receipt chain** = the toolkit's law: `receipts[i].hash ==
+  sha256hex(canonicalJSON({seq, op, prev}))`, `receipts[0].prev ==
+  manifest.genesis.prevHash`, `receipts[i].prev == receipts[i-1].hash`,
+  `receipts[i].seq == receiptRange.start + i`, and a present chain must be the
+  FULL window (`receipts.length == receiptRange.count`). All effect content
+  lives INSIDE `op` so the single hash covers it.
+- A conforming fixture (2 cells, 3 receipts, real GENESIS→tip chain) is at
+  `fixture/organ-manifest-v1.json` (generated by
+  `fixture/make-organ-manifest-fixture.mjs`); the harness
+  (`scripts/validate-dialect.mjs`) proves BOTH implementations validate it and
+  reject every tampered control.
 
-- **canonical JSON** = recursive key-sorted `JSON.stringify` (identical
-  implementation in `fixture/make-greeter-organ.mjs`, in the worker, and in any
-  conforming client — see `canonical()` in `src/organ-boot-loader/worker.js`).
-- **organ id** = `sha256hex(canonicalJSON(manifest))` — derived by the SERVER,
-  never client-chosen. The store is content-addressed: identical manifest ⇒
-  identical id (PUT is idempotent), GET answers are immutable.
-- **stateHash** must equal `sha256hex(canonicalJSON(state))` or PUT is rejected 400.
-- **receipt chain**: `receipts[0].prev == "genesis"`, `receipts[i].prev ==
-  receipts[i-1].digest`, `receipts[i].digest == sha256hex(canonicalJSON(receipt
-  minus digest))`, and `receipts[i].digest == manifest.receiptRange[i]`.
+### Legacy transition dialect: quilt.organ.v1 (accepted, deprecated)
 
-A conforming minimal fixture (2 cells, 3 receipts, real hash chain) is at
-`fixture/greeter-organ.json`, generated by `fixture/make-greeter-organ.mjs`
-(deterministic; lane 63-c can emit real organs against the same contract).
+The wave-63 worker dialect (`bundle.schemaVersion: "quilt.organ.v1"`; digest
+receipts `{seq, op, cell, prev, payload, digest}`, 1-based, `genesis`-anchored)
+is still accepted. Every response to a legacy-dialect PUT carries the header
+`x-quilt-schema-deprecated: quilt.organ.v1`; `/verify` reports the dialect of
+whatever is stored. Before/after mapping + policy:
+`receipts/DIALECT-UNIFICATION.md`. The legacy fixture is preserved untouched
+at `fixture/greeter-organ.json`.
 
 ## organ-boot-loader endpoints
 
 | route | auth | behavior |
 |---|---|---|
+| `GET /` | — | service index (dialect registry included) |
+| `GET /organs` | — | list organs: id, schemaVersion (dialect), cellCount, receiptCount, stateHash, byteSize, uploadedAt |
+| `PUT /organ` | token | detect dialect → validate (canonical: full toolkit law + whole-state; legacy: original law) → store; returns derived id + dialect + paths; legacy responses carry `x-quilt-schema-deprecated` |
+| `GET /organ/{sha256}` | — | serve bundle; `ETag` + `x-quilt-organ-sha256` + `x-quilt-schema` headers; `Cache-Control: immutable` |
+| `GET /organ/{sha256}/verify` | — | recompute every commitment server-side → `{bootable, reason, dialect, checks}` — a remote agent checks BEFORE booting; reports which dialect was served |
+
+## organ-watcher endpoints
+
+| route | auth | behavior |
+|---|---|---|
 | `GET /` | — | service index |
-| `GET /organs` | — | list organs: id, schemaVersion, cellCount, receiptCount, stateHash, byteSize, uploadedAt |
-| `PUT /organ` | token | validate (schema, stateHash, receipt chain) → store; returns derived id + paths |
-| `GET /organ/{sha256}` | — | serve bundle; `ETag` + `x-quilt-organ-sha256` headers; `Cache-Control: immutable` |
-| `GET /organ/{sha256}/verify` | — | recompute manifest digest, stateHash, receipt chain → `{bootable, reason, checks}` — a remote agent checks BEFORE booting |
+| `GET /status` | — | dashboard: last check per organ `{id, name, dialect, bootable, checkedAt, driftDetected, rederived}` + `fleetHealth` summary (`organsTracked/bootable/drifted/indeterminate/state`) |
+| `POST /check` | token | force one full check cycle NOW (same as the hourly cron) and return the fresh dashboard |
+
+- Cron: hourly (`0 * * * *`), free-tier friendly. A cycle lists every organ id
+  from the shared KV and INDEPENDENTLY re-derives the commitments from the
+  stored bytes (it shares no code path with the loader — see
+  `receipts/ORGAN-WATCHER.md` finding F1 for why it does not call `/verify`
+  over HTTP: same-account worker→worker fetches on workers.dev are blocked by
+  the platform).
+- `driftDetected`: `true` = a stored organ FAILED re-derivation (**FINDING —
+  receipted, never deleted**) · `false` = boot-ready · `null` = indeterminate.
+- The watcher only ever WRITES `watch:*` rows; organ data is never touched.
 
 Notes:
 - CORS is open (`*`) on every route, OPTIONS preflight answered 204 — any agent
@@ -97,7 +148,8 @@ Notes:
 
 ## Auth + secret discipline
 
-One shared token (`WORKER_UPLOAD_TOKEN`) guards `PUT /organ` and `POST /judge`:
+One shared token (`WORKER_UPLOAD_TOKEN`) guards `PUT /organ`, `POST /judge`,
+and the watcher's `POST /check`:
 
 ```
 Authorization: Bearer <WORKER_UPLOAD_TOKEN>     # or header: x-quilt-token: <token>
@@ -112,6 +164,7 @@ Authorization: Bearer <WORKER_UPLOAD_TOKEN>     # or header: x-quilt-token: <tok
   export CLOUDFLARE_API_TOKEN=$(grep '^CLOUDFLARE_API_TOKEN=' /home/z/my-project/.env.keys | cut -d= -f2-)
   npx wrangler secret put WORKER_UPLOAD_TOKEN --name organ-boot-loader   # paste value on stdin
   npx wrangler secret put WORKER_UPLOAD_TOKEN --name judge-relay
+  npx wrangler secret put WORKER_UPLOAD_TOKEN --name organ-watcher
   npx wrangler secret put DEEPINFRA_KEY        --name judge-relay        # alias: DEEPINFRA_API_KEY
   ```
 
@@ -122,20 +175,27 @@ Authorization: Bearer <WORKER_UPLOAD_TOKEN>     # or header: x-quilt-token: <tok
 ## Deploy / test
 
 ```bash
-ENV_KEYS=/home/z/my-project/.env.keys scripts/deploy.sh     # verify token → KV → upload both workers → enable *.workers.dev
-ENV_KEYS=/home/z/my-project/.env.keys scripts/live-test.sh  # upload→verify→GET round-trip + judge fan-out (redacted transcript)
-node fixture/make-greeter-organ.mjs > fixture/greeter-organ.json
+ENV_KEYS=/home/z/my-project/.env.keys scripts/deploy.sh     # verify token → KV → upload all three workers → cron → enable *.workers.dev
+ENV_KEYS=/home/z/my-project/.env.keys scripts/live-test.sh  # round-trips (legacy + canonical) + watcher + judge fan-out (redacted transcript)
+node scripts/validate-dialect.mjs                           # L15 harness: fixture vs BOTH implementations + negative controls (38 checks)
+node fixture/make-greeter-organ.mjs          > fixture/greeter-organ.json       # legacy transition fixture
+node fixture/make-organ-manifest-fixture.mjs > fixture/organ-manifest-v1.json   # canonical fixture
 ```
 
-Both scripts read every credential from the gitignored `.env.keys`; nothing is
-hardcoded. Account id (non-secret) pinned in `scripts/deploy.sh`.
+The dialect harness needs the toolkit peer checkout at
+`../quilt-jev-toolkit` (override with `TOOLKIT_MANIFEST_MJS`; fail-closed if
+missing). Both deploy scripts read every credential from the gitignored
+`.env.keys`; nothing is hardcoded. Account id (non-secret) pinned in
+`scripts/deploy.sh`.
 
 ## Inventive-uses backlog (ranked, deploy next)
 
-1. **organ-watcher (cron trigger worker)** — scheduled organ health checks:
-   periodically re-verify every stored organ's stateHash/receipt chain, alert
-   via a pinned status organ; the fleet's boot-readiness monitor. Cheapest
-   win: reuses `/verify` logic, adds `GET /status` for lanes.
+1. ~~**organ-watcher (cron trigger worker)**~~ — DONE wave 64 (64-c):
+   https://organ-watcher.casey-digennaro.workers.dev — hourly independent
+   re-verification + `GET /status`; receipt `receipts/ORGAN-WATCHER.md`.
+   Follow-ups: drift-history rows (`watch:{id}:{checkedAt}`) and an alert hook
+   (pinned status organ / notification lane) when `fleetHealth.state` flips to
+   `DRIFT-DETECTED`.
 2. **organ-boot-bridge (Durable Object “nesting” coordinator)** — a DO that
    hands an incoming agent a boot ticket: organ id + receipt-cursor + a signed
    lease, so two lanes can nest around the SAME saved state without racing.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy.sh — deploy organ-boot-loader + judge-relay to Cloudflare Workers via REST API.
+# deploy.sh — deploy organ-boot-loader + judge-relay + organ-watcher to Cloudflare Workers via REST API.
 #
 # Secret discipline:
 #   - ALL credentials come from a gitignored .env.keys file (CLOUDFLARE_API_TOKEN,
@@ -122,7 +122,27 @@ print(json.dumps([
   {'type':'secret_text','name':'DEEPINFRA_API_KEY','text':os.environ['DEEPINFRA_API_KEY']},
 ]))")"
 
+# --- 4. organ-watcher (shared KV + WORKER_UPLOAD_TOKEN + LOADER_URL; cron hourly)
+# Backlog item 1 (wave 64, 64-c): hourly re-verification of every organ in the
+# store + GET /status fleet dashboard. Shares the SAME KV namespace as the
+# loader (reads organ bytes, writes only watch:* rows — never deletes).
+upload_worker "organ-watcher" "$ROOT/src/organ-watcher/worker.js" "$(python3 -c "
+import json, os
+print(json.dumps([
+  {'type':'kv_namespace','name':'ORGANS','namespace_id':'$KV_ID'},
+  {'type':'secret_text','name':'WORKER_UPLOAD_TOKEN','text':os.environ['WORKER_UPLOAD_TOKEN']},
+  {'type':'plain_text','name':'LOADER_URL','text':'https://organ-boot-loader.'+'$SUB'+'.workers.dev'},
+]))")"
+
+# cron trigger: hourly at :00 — free-tier friendly (24 cycles/day, ~2 KV writes
+# per organ per cycle + 1 summary row).
+curl -sfS -X PUT "${auth[@]}" -H 'content-type: application/json' \
+  -d '[{"cron":"0 * * * *"}]' \
+  "$API/accounts/$ACCOUNT_ID/workers/scripts/organ-watcher/schedules" > /dev/null
+echo "cron schedule set for organ-watcher: 0 * * * * (hourly)"
+
 echo
 echo "organ-boot-loader: https://organ-boot-loader.$SUB.workers.dev"
 echo "judge-relay:       https://judge-relay.$SUB.workers.dev"
+echo "organ-watcher:     https://organ-watcher.$SUB.workers.dev"
 echo "DEPLOY_TS=$(date -u +%FT%TZ)"
