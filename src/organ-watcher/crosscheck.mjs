@@ -37,6 +37,21 @@
  *   "sig-unverifiable" (HMAC row only; stale key or tampered),
  *   "error" (read/parse failure — recorded, never guessed).
  *
+ * Lane-id normalization (wave-69, 69-f): the join assumes lane name ==
+ * chain_id, but the two stores name lanes under different laws — fleet canon
+ * carries COLONS ("erised-sequencer:anchor-proof", receipted in
+ * receipts/TIP-ANCHOR.md: "fleet canon carries a colon by convention"), while
+ * OUR notary's lane law (tip-notary/logic.mjs LANE_RE) forbids them, so a
+ * colon-carrying chain_id could never be anchored on our side under its own
+ * name and the exact-name join could never see it dual-witnessed. The join
+ * key is therefore the NORMALIZED id (normalizeLaneId: ":" -> "-", the
+ * in-law substitute); raw ids are preserved verbatim in each row's `rawId`
+ * and in the record's `rawIds` receipt. Groups with a single raw id keep the
+ * raw id as the record's lane (byte-compatible with pre-69f rows); only a
+ * real merge (the same lane seen under both namings) publishes the
+ * normalized name — and if the two namings carry DIFFERENT tips, that is
+ * still NOTARY-DISAGREE (normalization must never hide a fork).
+ *
  * Agreement matrix (per lane; fleet = max severity across lanes):
  *   BOTH-MATCH      >= 2 valid anchors, all tips equal
  *   NOTARY-DISAGREE >= 2 valid anchors, tips differ  ← THE ALARM
@@ -133,6 +148,17 @@ export async function readNotaryOurs(kv, lane, token = null) {
   return { notary: NOTARY_OURS, state: "anchored", tip: raw.tip, day, anchoredAt: raw.anchoredAt };
 }
 
+/**
+ * The cross-notary join key: fleet-canon colons mapped into OUR notary's lane
+ * alphabet (LANE_RE allows [a-z0-9_-]). Pure and conservative: only ":" is
+ * rewritten (the one receipted divergence between the namings); everything
+ * else passes through untouched. Exported for node --test.
+ */
+export function normalizeLaneId(id) {
+  if (typeof id !== "string") throw new TypeError(`normalizeLaneId: expected string, got ${typeof id}`);
+  return id.trim().replace(/:/g, "-");
+}
+
 /** MAVIS (quilt-tip-anchor): ANCHORS KV, latest:{chain_id} -> anchor:{chain_id}:{seq}, HMAC-signed. */
 export async function readNotaryMavis(kv, chainId, token) {
   let latestSeq;
@@ -210,25 +236,40 @@ export async function crossCheckSweep(env) {
   const oursKv = env.ORGANS;
   const mavisKv = env.ANCHORS;
 
-  // lanes = ours(notary-latest:*) ∪ mavis(index:*) ∪ LANE_CONFIG
-  const lanes = new Set(Object.keys(LANE_CONFIG));
+  // raw lane ids = ours(notary-latest:*) ∪ LANE_CONFIG keys, and mavis(index:*)
+  const oursRaw = new Set(Object.keys(LANE_CONFIG));
   if (oursKv) {
     let cursor;
     do {
       const page = await oursKv.list({ prefix: OURS_LATEST_PREFIX, limit: 1000, cursor });
-      for (const k of page.keys) lanes.add(k.name.slice(OURS_LATEST_PREFIX.length));
+      for (const k of page.keys) oursRaw.add(k.name.slice(OURS_LATEST_PREFIX.length));
       cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor && lanes.size < MAX_LANES);
+    } while (cursor && oursRaw.size < MAX_LANES);
   }
+  const mavisRaw = new Set();
   if (mavisKv) {
     let cursor;
     do {
       const page = await mavisKv.list({ prefix: MAVIS_INDEX_PREFIX, limit: 1000, cursor });
-      for (const k of page.keys) lanes.add(k.name.slice(MAVIS_INDEX_PREFIX.length));
+      for (const k of page.keys) mavisRaw.add(k.name.slice(MAVIS_INDEX_PREFIX.length));
       cursor = page.list_complete ? undefined : page.cursor;
-    } while (cursor && lanes.size < MAX_LANES);
+    } while (cursor && mavisRaw.size < MAX_LANES);
   }
-  const laneList = [...lanes].slice(0, MAX_LANES);
+
+  // group raw ids by the NORMALIZED join key (69-f): colon-carrying fleet-canon
+  // names and their in-law dash spellings are the SAME lane; each row keeps its
+  // rawId so nothing is guessed about which spelling carried which witness.
+  const groups = new Map(); // normKey -> { ours: Set, mavis: Set, order }
+  const groupFor = (rawId, side) => {
+    const key = normalizeLaneId(rawId);
+    if (!groups.has(key)) groups.set(key, { ours: new Set(), mavis: new Set() });
+    groups.get(key)[side].add(rawId);
+    return key;
+  };
+  const laneList = [];
+  for (const raw of oursRaw) { const k = groupFor(raw, "ours"); if (!laneList.includes(k)) laneList.push(k); }
+  for (const raw of mavisRaw) { const k = groupFor(raw, "mavis"); if (!laneList.includes(k)) laneList.push(k); }
+  const groupKeys = laneList.slice(0, MAX_LANES);
 
   const out = [];
   let disagreements = 0;
@@ -237,16 +278,39 @@ export async function crossCheckSweep(env) {
   let noAnchors = 0;
   let flawedRows = 0;
 
-  for (const lane of laneList) {
-    // Mavis's axis is chain_id; the join key is the lane NAME (receipted).
-    const mavisRow = mavisKv
-      ? await readNotaryMavis(mavisKv, lane, env.WORKER_UPLOAD_TOKEN)
-      : { notary: NOTARY_MAVIS, state: "error", detail: "ANCHORS KV namespace not bound to this watcher" };
-    const oursRow = oursKv
-      ? await readNotaryOurs(oursKv, lane)
-      : { notary: NOTARY_OURS, state: "error", detail: "ORGANS KV namespace not bound to this watcher" };
+  for (const normKey of groupKeys) {
+    const g = groups.get(normKey);
+    const mavisIds = [...g.mavis].sort();
+    const oursIds = [...g.ours].sort();
 
-    const rows = [mavisRow, oursRow];
+    // Each witness read from its OWN store under ITS OWN law, at its raw id.
+    // A notary with no raw spelling in the group contributes one explicit
+    // "unanchored" row at the normalized spelling — the pair-shaped record is
+    // kept (both reads receipted), and the index/notary-latest listings are
+    // the complete universe of each store's anchored lanes, so a spelling
+    // absent from the listing provably has no anchor row to read.
+    const mavisRows = [];
+    if (mavisKv) {
+      for (const rawId of mavisIds) {
+        const r = await readNotaryMavis(mavisKv, rawId, env.WORKER_UPLOAD_TOKEN);
+        mavisRows.push({ ...r, rawId });
+      }
+      if (!mavisIds.length) mavisRows.push({ notary: NOTARY_MAVIS, state: "unanchored", rawId: normKey });
+    } else {
+      mavisRows.push({ notary: NOTARY_MAVIS, state: "error", detail: "ANCHORS KV namespace not bound to this watcher" });
+    }
+    const oursRows = [];
+    if (oursKv) {
+      for (const rawId of oursIds) {
+        const r = await readNotaryOurs(oursKv, rawId);
+        oursRows.push({ ...r, rawId });
+      }
+      if (!oursIds.length) oursRows.push({ notary: NOTARY_OURS, state: "unanchored", rawId: normKey });
+    } else {
+      oursRows.push({ notary: NOTARY_OURS, state: "error", detail: "ORGANS KV namespace not bound to this watcher" });
+    }
+    const rows = [...mavisRows, ...oursRows];
+
     const v = agreementVerdict(rows);
     if (v.notaryAgreement === "NOTARY-DISAGREE") disagreements += 1;
     else if (v.notaryAgreement === "BOTH-MATCH") bothMatches += 1;
@@ -254,15 +318,27 @@ export async function crossCheckSweep(env) {
     else noAnchors += 1;
     flawedRows += rows.filter((r) => r.state === "corrupt" || r.state === "sig-unverifiable" || r.state === "error").length;
 
+    // One distinct spelling (both sides using the same name) keeps the raw
+    // name — byte-compatible with pre-69f rows. A REAL merge (the same lane
+    // under both namings) publishes the normalized join key, rawIds receipted.
+    const spellings = [...new Set([...mavisIds, ...oursIds])];
+    const lane = spellings.length === 1 ? spellings[0] : normKey;
     const record = {
       lane,
       checkedAt,
+      ...(spellings.length > 1 ? { rawIds: { [NOTARY_MAVIS]: mavisIds, [NOTARY_OURS]: oursIds } } : {}),
       notaries: rows,
       notaryAgreement: v.notaryAgreement,
       divergence: v.divergence,
       reason: v.reason,
     };
-    await oursKv.put(`${NOTARY_ROW_PREFIX}${lane}`, JSON.stringify(record));
+    // Persist under the lane name AND every raw spelling in the group — a
+    // pre-69f row keyed by the colon spelling is superseded in place (the
+    // watcher's own derived view, rewritten every cycle; never a data row).
+    const persistKeys = new Set([lane, ...spellings]);
+    for (const key of persistKeys) {
+      await oursKv.put(`${NOTARY_ROW_PREFIX}${key}`, JSON.stringify(record));
+    }
     out.push(record);
   }
 
@@ -288,7 +364,10 @@ export async function crossCheckSweep(env) {
   };
 }
 
-/** Rehydrate persisted notary rows for /status. */
+/** Rehydrate persisted notary rows for /status. Since 69f a lane's record may
+ * sit under MORE than one key (the lane name + each raw spelling, so a
+ * pre-69f row is superseded in place); dedupe by `lane`, keeping the freshest
+ * checkedAt, so fleetHealth counts lanes, not key spellings. */
 export async function loadNotaryRows(kv) {
   const rows = [];
   let cursor;
@@ -302,7 +381,13 @@ export async function loadNotaryRows(kv) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor && ++pages < 16 && rows.length < 512);
   rows.sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0));
-  return rows;
+  const deduped = [];
+  for (const r of rows) {
+    const prev = deduped.find((x) => x.lane === r.lane);
+    if (!prev) deduped.push(r);
+    else if (String(r.checkedAt ?? "") > String(prev.checkedAt ?? "")) deduped[deduped.indexOf(prev)] = r;
+  }
+  return deduped;
 }
 
 export function fleetAgreement(notaryRows) {

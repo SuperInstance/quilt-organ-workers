@@ -183,6 +183,18 @@ both-match > partial > no-anchors). Local proofs:
 partial both directions, tampered sig/sha256 fail-closed, pinned HMAC vector,
 sweep-level fleet verdict).
 
+**Lane-id normalization (wave 69, 69-f).** Fleet canon carries colons
+(`erised-sequencer:anchor-proof`, receipted in `receipts/TIP-ANCHOR.md`) but
+our notary's lane law (`LANE_RE`) forbids them, so a colon-carrying lane could
+never be dual-witnessed under one name. The join key is now
+`normalizeLaneId` (`:` → `-`; fail-closed on non-strings): raw spellings stay
+receipted per row (`rawId`) and per record (`rawIds`); a lane seen under one
+spelling keeps that raw name in its record, a real two-spelling merge
+publishes the normalized name — and different tips under different spellings
+still verdict `NOTARY-DISAGREE` (normalization must never hide a fork). Rows
+persist under every spelling seen (a pre-69f row is superseded in place) and
+`loadNotaryRows` dedupes by lane, so `fleetHealth` counts lanes, not spellings.
+
 ## quilt-tip-notary endpoints
 
 | route | auth | behavior |

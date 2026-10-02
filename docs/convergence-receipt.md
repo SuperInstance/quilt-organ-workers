@@ -241,3 +241,35 @@ redacted output; no `bash -x`). Nothing deleted anywhere: the tip-anchor
 redeploy changed only its secret binding value (code byte-verified identical
 before/after); both KV namespaces are append-only; `watch:_notaries:*` rows
 add to, never rewrite, the watcher's namespace.
+
+---
+
+## Addendum (wave-69, lane 69-f, anchors 2026-10-02T18:14:42/43Z, cycle 18:20:56Z) — §9.1 and §9.3 resolved
+
+Full receipt: `receipts/DUAL-ANCHOR-69F.md`. Short form, in this document
+because it resolves this document's follow-ups:
+
+- **§9.1 (adoption → PARTIALs trend to BOTH-MATCH): done for the two live
+  PARTIALs.** `erised-ft1` (tip re-derived from genesis, 73 receipts) and
+  `z-67a-selftest` (tip read from our notary) both landed in Mavis's store at
+  18:14:42.218Z / 18:14:43.855Z — 201s, read-verified `verified:true`. After
+  the 69-f cycle: qmr1, erised-ft1, z-67a-selftest all BOTH-MATCH; partials 0.
+- **§9.3 (re-sign the pre-rotation row): resolved as DECLINED, with a named
+  reason** — the underlying chain (the wave-66 live-test erised-sequencer
+  session, seq 2) is runtime-only and never committed; GitHub code search for
+  the tip across the org returns 0. Re-anchoring `b9f3176d…` from the
+  sig-unverifiable row itself would launder an untrusted claim into a valid
+  witness — the opposite of the fail-closed law §5 receipts. The lane stays
+  NO-ANCHORS, the old row stays (never-delete-data), and the receipt names the
+  one honest path back: commit the session ledger somewhere derivable, then
+  re-anchor both sides. (Also receipted: "at its current seq" read literally
+  would overwrite `anchor:…:2` — KV put replaces — which the never-delete law
+  forbids; the append-at-seq-3 form was the defensible one, and it is declined
+  on the laundering ground, not the seq ground.)
+- **Bonus (the join law 69-f found):** §4's join contract ("lane name ==
+  chain_id") silently assumed the two stores share a lane alphabet. They do
+  not — fleet canon carries colons, our `LANE_RE` forbids them. 69-f added
+  `normalizeLaneId` (`:` → `-`) to the join, additive, 4 tests (47/47), raw
+  spellings receipted, fork-across-spellings still NOTARY-DISAGREE. The
+  colon-carrying lane can now be dual-witnessed the day its chain becomes
+  derivable.

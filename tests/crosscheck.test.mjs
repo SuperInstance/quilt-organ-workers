@@ -35,6 +35,7 @@ import {
   crossCheckSweep,
   loadNotaryRows,
   fleetAgreement,
+  normalizeLaneId,
   NOTARY_OURS,
   NOTARY_MAVIS,
 } from "../src/organ-watcher/crosscheck.mjs";
@@ -257,4 +258,114 @@ test("fleetAgreement severity ordering: disagree > both-match > partial > no-anc
 
 test("canonical poison stays fail-closed in this module too", async () => {
   assert.throws(() => canonical({ bad: undefined }), TypeError);
+});
+
+// ---- lane-id normalization across the two namings (wave-69, 69-f) ------------
+// Fleet canon carries colons ("erised-sequencer:anchor-proof", receipted in
+// receipts/TIP-ANCHOR.md); OUR notary's lane law (LANE_RE) forbids them — so
+// the exact-name join could never see a colon-carrying lane dual-witnessed.
+// The join key is normalizeLaneId (":" -> "-"); raw spellings stay receipted.
+
+test("normalizeLaneId: colon -> dash is the whole law; plain ids pass through", () => {
+  assert.equal(normalizeLaneId("erised-sequencer:anchor-proof"), "erised-sequencer-anchor-proof");
+  assert.equal(normalizeLaneId("qmr1"), "qmr1");
+  assert.equal(normalizeLaneId("erised-ft1"), "erised-ft1");
+  assert.equal(normalizeLaneId("  spaced:out  "), "spaced-out"); // trims, then maps
+  assert.equal(normalizeLaneId("a:b:c"), "a-b-c"); // every colon, not just the first
+  assert.throws(() => normalizeLaneId(null), TypeError); // fail-closed, never coerced
+  assert.throws(() => normalizeLaneId(undefined), TypeError);
+});
+
+test("69f join: colon-carrying Mavis chain + dash-spelled ours lane, SAME tip -> one BOTH-MATCH lane, not two PARTIALs", async () => {
+  const day = "2026-10-02";
+  const oursKv = mockOursKv();
+  const mavisKv = mockMavisKv();
+
+  // Mavis holds the colon spelling; our notary (LANE_RE forbids colons) holds
+  // the dash spelling — the same lane, witnessed by both, joined by law.
+  const mrow = await mavisRow("erised-sequencer:anchor-proof", TIP_A, 3, "2026-10-02T18:20:00.000Z", "69f fixture");
+  mavisKv._m.set("anchor:erised-sequencer:anchor-proof:3", JSON.stringify(mrow));
+  mavisKv._m.set("latest:erised-sequencer:anchor-proof", "3");
+  mavisKv._m.set("index:erised-sequencer:anchor-proof", JSON.stringify({ chain_id: "erised-sequencer:anchor-proof", latest_seq: 3, latest_tip: TIP_A }));
+  const rec = await oursRecord("erised-sequencer-anchor-proof", day, TIP_A, "69f fixture");
+  oursKv._m.set("anchor:erised-sequencer-anchor-proof:2026-10-02", JSON.stringify(rec));
+  oursKv._m.set("notary-latest:erised-sequencer-anchor-proof", day);
+
+  const result = await crossCheckSweep({ ORGANS: oursKv, ANCHORS: mavisKv, WORKER_UPLOAD_TOKEN: TOKEN });
+
+  // ONE merged lane (normalized name, raw spellings receipted) — not two partials
+  const merged = result.lanes.filter((r) => r.lane.startsWith("erised-sequencer"));
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].lane, "erised-sequencer-anchor-proof");
+  assert.equal(merged[0].notaryAgreement, "BOTH-MATCH");
+  assert.deepEqual(merged[0].rawIds, {
+    [NOTARY_MAVIS]: ["erised-sequencer:anchor-proof"],
+    [NOTARY_OURS]: ["erised-sequencer-anchor-proof"],
+  });
+  assert.deepEqual(merged[0].notaries.map((n) => n.rawId), ["erised-sequencer:anchor-proof", "erised-sequencer-anchor-proof"]);
+  assert.equal(result.summary.bothMatches, 1); // one LANE, not two key spellings
+  assert.equal(result.summary.partials, 0);
+
+  // persisted under BOTH spellings; the loader dedupes to one row per lane
+  assert.ok(oursKv._m.has("watch:_notaries:erised-sequencer-anchor-proof"));
+  assert.ok(oursKv._m.has("watch:_notaries:erised-sequencer:anchor-proof"));
+  const loaded = await loadNotaryRows(oursKv);
+  const erisedRows = loaded.filter((r) => r.lane.startsWith("erised-sequencer"));
+  assert.equal(erisedRows.length, 1);
+  assert.equal(erisedRows[0].notaryAgreement, "BOTH-MATCH");
+  // nothing deleted: every pre-sweep key is still present
+  assert.ok([...mavisKv._m.keys()].every((k) => mavisKv._m.has(k)));
+});
+
+test("69f join must not hide a fork: same lane under both namings with DIFFERENT tips -> NOTARY-DISAGREE", async () => {
+  const day = "2026-10-02";
+  const oursKv = mockOursKv();
+  const mavisKv = mockMavisKv();
+
+  const mrow = await mavisRow("a:b", TIP_A, 1, "2026-10-02T09:00:00.000Z");
+  mavisKv._m.set("anchor:a:b:1", JSON.stringify(mrow));
+  mavisKv._m.set("latest:a:b", "1");
+  mavisKv._m.set("index:a:b", JSON.stringify({ chain_id: "a:b", latest_seq: 1, latest_tip: TIP_A }));
+  const rec = await oursRecord("a-b", day, TIP_C, "fork under the other spelling");
+  oursKv._m.set("anchor:a-b:2026-10-02", JSON.stringify(rec));
+  oursKv._m.set("notary-latest:a-b", day);
+
+  const result = await crossCheckSweep({ ORGANS: oursKv, ANCHORS: mavisKv, WORKER_UPLOAD_TOKEN: TOKEN });
+  const merged = result.lanes.find((r) => r.lane === "a-b");
+  assert.equal(merged.notaryAgreement, "NOTARY-DISAGREE");
+  assert.equal(merged.divergence, true);
+  assert.equal(result.notaryAgreement, "NOTARY-DISAGREE");
+});
+
+test("69f supersession: a pre-69f row keyed by the colon spelling is refreshed in place, never duplicated", async () => {
+  const day = "2026-10-02";
+  const oursKv = mockOursKv();
+  const mavisKv = mockMavisKv();
+
+  // yesterday's verdict sitting under the colon key (as the live store has it)
+  const staleRow = {
+    lane: "erised-sequencer:anchor-proof",
+    checkedAt: "2026-10-02T17:23:29.505Z",
+    notaries: [{ notary: NOTARY_MAVIS, state: "sig-unverifiable" }, { notary: NOTARY_OURS, state: "unanchored" }],
+    notaryAgreement: "NO-ANCHORS",
+    divergence: false,
+    reason: "no VALID anchor",
+  };
+  oursKv._m.set("watch:_notaries:erised-sequencer:anchor-proof", JSON.stringify(staleRow));
+
+  // ...and now a valid post-rotation witness lands on Mavis's side only
+  const mrow = await mavisRow("erised-sequencer:anchor-proof", TIP_B, 3, "2026-10-02T18:20:00.000Z", "69f fixture");
+  mavisKv._m.set("anchor:erised-sequencer:anchor-proof:3", JSON.stringify(mrow));
+  mavisKv._m.set("latest:erised-sequencer:anchor-proof", "3");
+  mavisKv._m.set("index:erised-sequencer:anchor-proof", JSON.stringify({ chain_id: "erised-sequencer:anchor-proof", latest_seq: 3, latest_tip: TIP_B }));
+
+  await crossCheckSweep({ ORGANS: oursKv, ANCHORS: mavisKv, WORKER_UPLOAD_TOKEN: TOKEN });
+
+  const refreshed = JSON.parse(oursKv._m.get("watch:_notaries:erised-sequencer:anchor-proof"));
+  assert.equal(refreshed.notaryAgreement, "PARTIAL"); // superseded in place
+  assert.equal(refreshed.lane, "erised-sequencer:anchor-proof"); // single spelling keeps the raw name
+  const loaded = await loadNotaryRows(oursKv);
+  const erisedRows = loaded.filter((r) => r.lane.startsWith("erised-sequencer"));
+  assert.equal(erisedRows.length, 1); // deduped — fleetHealth counts lanes, not spellings
+  assert.ok(oursKv._m.has("watch:_notaries:erised-sequencer:anchor-proof")); // nothing vanished
 });
