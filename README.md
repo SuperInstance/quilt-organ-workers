@@ -345,3 +345,14 @@ API); a single-file upload of the watcher would fail at boot on the unresolved
   judge tokens — all trivially inside caps).
 - This repo has NO secrets: the only key-shaped strings ever committed are
   hash digests of fixtures (64-hex, safe by construction).
+
+## Documentation
+
+Wave-69 full-knowledge documentation package (task 69-doc-d) — routes by audience:
+
+- **New agent, zero context** → [docs/ONBOARDING.md](docs/ONBOARDING.md) — identity, verify-it-works commands, reading order, gotchas, open frontier.
+- **End users** (upload an organ, judge a candidate, anchor a tip, read the dashboard) → [docs/USER-GUIDE.md](docs/USER-GUIDE.md) — first success in 5 minutes, everyday tasks, troubleshooting table, FAQ.
+- **Developers extending the code** → [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) — code layout, core concepts as the code names them, how to extend, testing, conventions, editor gotchas.
+- **Engineers operating/reviewing** → [docs/ENGINEERING-NOTES.md](docs/ENGINEERING-NOTES.md) — architecture diagram, invariants, failure modes & blast radius, measured cost envelope, operations & credentials model, design decisions.
+- **Executives** → [docs/CTO-BRIEF.md](docs/CTO-BRIEF.md) — value statement, maturity (working, with evidence), risks/mitigations, cost profile, strategic options, integration surface.
+- **Index of all deeper knowledge** → [docs/KNOWLEDGE-MAP.md](docs/KNOWLEDGE-MAP.md) — repo map, pre-existing docs, fleet relationships, journal task IDs, receipts of record, search recipes.
