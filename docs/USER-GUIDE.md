@@ -37,6 +37,7 @@ curl -s https://organ-boot-loader.casey-digennaro.workers.dev/organs
 #      "cellCount":2,"receiptCount":3,"name":"greeter-organ",...}, ...]}
 # verified live: count 5 — greeter-organ (legacy), cell-rewind-organ (legacy, 23 cells),
 # greeter-organ (canonical quilt.organ.manifest/v1), and two more legacy greeter organs
+# (snapshot at wave-69; expect the live store to grow)
 
 curl -s https://organ-boot-loader.casey-digennaro.workers.dev/organ/677a3c79cde07ea4628c5326a446ee0719702cb0d476c38a44587dbea3552fcb/verify
 # → {"ok":true,"bootable":true,"dialect":"quilt.organ.manifest/v1","checks":{...}}
@@ -120,6 +121,19 @@ Without a token, just read `GET /status` — the hourly cron keeps it fresh
 curl -s https://quilt-tip-notary.casey-digennaro.workers.dev/anchor/qmr1        # days + latest record
 curl -s https://quilt-tip-notary.casey-digennaro.workers.dev/anchor/qmr1/2026-10-02   # one record, sha256 re-derived
 ```
+
+### 7. Read a chain's anchor witness (the tip-anchor sibling)
+`quilt-tip-anchor` (`https://quilt-tip-anchor.casey-digennaro.workers.dev`) is
+the chain_id/seq timestamp witness with HMAC-signed rows; reads are public:
+
+```bash
+curl -s https://quilt-tip-anchor.casey-digennaro.workers.dev/health
+curl -s https://quilt-tip-anchor.casey-digennaro.workers.dev/anchor/<chain_id>   # latest anchor row for the chain
+```
+
+`GET /anchor/{chain_id}` answers the latest anchor; append `/{tip}` to verify a
+specific tip was anchored (200/404). Note `/` intentionally 404s — the worker
+has no index route, so start from `/health` or `/anchor/{chain_id}`.
 
 ## Troubleshooting
 

@@ -291,6 +291,7 @@ Authorization: Bearer <WORKER_UPLOAD_TOKEN>     # or header: x-quilt-token: <tok
 ENV_KEYS=/home/z/my-project/.env.keys scripts/deploy.sh     # verify token → KV → upload all four workers → cron → enable *.workers.dev
 ENV_KEYS=/home/z/my-project/.env.keys scripts/deploy-tip-notary.sh      # surgical: quilt-tip-notary only
 ENV_KEYS=/home/z/my-project/.env.keys scripts/deploy-organ-watcher.sh   # surgical: organ-watcher only (2-module) + cron re-assert
+ENV_KEYS=/home/z/my-project/.env.keys scripts/deploy-tip-anchor.sh      # surgical: quilt-tip-anchor only (wave-66)
 ENV_KEYS=/home/z/my-project/.env.keys scripts/live-test.sh  # round-trips (legacy + canonical) + watcher + judge fan-out (redacted transcript)
 node scripts/validate-dialect.mjs                           # L15 harness: fixture vs BOTH implementations + negative controls (38 checks)
 node --test tests/tip-notary.test.mjs tests/divergence.test.mjs   # wave-67: notary law (30 checks) + divergence simulation

@@ -11,11 +11,12 @@ The fleet's core claim is the **quilt-organ**: a saved-state bundle (manifest + 
 Reads against the live workers need no credentials (CORS/GET is open):
 
 ```bash
-# Liveness (all four workers answer 200)
+# Liveness (all five workers answer 200)
 curl -s https://organ-boot-loader.casey-digennaro.workers.dev/
 curl -s https://judge-relay.casey-digennaro.workers.dev/health
 curl -s https://organ-watcher.casey-digennaro.workers.dev/status | python3 -m json.tool | head -40
 curl -s https://quilt-tip-notary.casey-digennaro.workers.dev/health
+curl -s https://quilt-tip-anchor.casey-digennaro.workers.dev/health
 
 # Store census + boot-readiness of one stored organ (no auth)
 curl -s https://organ-boot-loader.casey-digennaro.workers.dev/organs
